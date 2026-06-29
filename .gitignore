@@ -1,0 +1,15 @@
+.venv-cpu/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+out/
+*.npz
+*.png
+*.jsonl
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store
