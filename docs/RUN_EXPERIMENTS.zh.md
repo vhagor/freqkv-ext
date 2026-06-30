@@ -173,23 +173,64 @@ python scripts/rate_distortion.py \
 
 ---
 
+## 3b. NE0 + NE1（诊断）——小波为什么赢？（C2 复盘）
+
+E2 显示小波大幅领先、DFT-RoPE≈DCT、RST 反而更差。在转向新方法前，必须先坐实
+**小波的优势来自哪里**。这一步完全离线、单卡 <1h、纯文本输出。
+
+```bash
+python scripts/diagnose_outliers.py \
+    --model_name_or_path "$MODEL" \
+    --seq-len 2048 --num-samples 8 \
+    --layers 0 8 16 31 \
+    --gammas 0.5 0.25 0.125 \
+    --anchor-m 1 4 16 \
+    --out-dir results/ne1_llama2
+```
+
+脚本一次性回答两件事：
+
+- **NE0（基底 vs 域）**：把 DCT/小波分别在 **pre-RoPE** 和 **post-RoPE** 上重建 K。
+  - `basis@post > 0` → 小波是真正更好的**基底**（不是只占了"压 pre-RoPE 更容易"的便宜）。
+  - `dom.effect` → post-RoPE 比 pre-RoPE 本质上难压多少。
+- **NE1（离群归因）**：K 的逐通道峰度、能量最集中的 token 位置（是否就是 sink/t=0）、
+  DCT 与小波各自的重建误差有多少落在这些离群 token 上，以及把 top-m 离群 token
+  作为**无损锚点**后，DCT↔小波的差距是否被抹平。
+
+**判读（脚本末尾 `## Read-out` 自动给）**：
+
+| 观察 | 含义 | 下一步 |
+|------|------|--------|
+| `basis@post` 明显 > 0 | 小波基底本身更优 | 小波就是方法主体 |
+| DCT 误差大量落在 top-m token，小波几乎不落 | "全局变换抹离群"假设成立 | 离群/sink 是关键 |
+| 锚点后 DCT 追平小波 | 赢点几乎全是离群 | 走"变换 + 无损锚点"（便宜路线 NE2）|
+| 锚点后小波仍赢 | 赢点也在平滑主体 | 小波为主，锚点为辅 |
+
+把 `results/ne1_llama2/diagnose.md` 整份贴回来即可。
+
 ## 4. 本地连通性自检（在 H100 跑之前，可选）
 
 在任意机器（含本地 RTX5060 / 纯 CPU）先确认脚本能跑通、再上 H100：
 
 ```bash
-# 不需要模型，用合成 AR(1)+spike 信号验证全链路 + RST 机制
+# 率失真全链路（合成 AR(1)+spike）
 python scripts/rate_distortion.py --dry-run \
     --seq-len 256 --num-samples 2 --layers 0 4 \
     --gammas 0.5 0.25 0.125 --device cpu --dtype float32 \
     --out-dir results/rd_dryrun
 
-# 单元测试（38 个）
+# 离群诊断全链路（合成 AR(1)+sink+spike）
+python scripts/diagnose_outliers.py --dry-run \
+    --seq-len 256 --num-samples 2 --layers 0 4 \
+    --gammas 0.5 0.25 0.125 --device cpu --dtype float32 \
+    --out-dir results/ne1_dryrun
+
+# 单元测试（44 个）
 uv run --extra cpu pytest -q
 ```
 
-dry-run 应当看到 RST 明显优于 DCT、α 扫描选出中间值——说明 bulk+residual 机制正确。
-（合成信号里 DFT-RoPE≈DCT 是正常的：随机 AR(1) 是宽带噪声，真实 K 才有结构。）
+诊断 dry-run 应看到：DCT 误差大量落在 sink（t=0）token 上、小波几乎不落，且
+`basis@post > 0`——说明脚本与离群归因逻辑正确。（跑完删掉 `results/*_dryrun`。）
 
 ---
 

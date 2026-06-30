@@ -6,13 +6,19 @@ import numpy as np
 import torch
 
 from freqkv_ext.rdcodecs import (
+    anchor_holdout_reconstruct,
     causal_attention_output,
     dct_keep_reconstruct,
     dft_rope_keep_reconstruct,
+    energy_fraction_in_tokens,
+    error_localization,
+    excess_kurtosis_along_seq,
     pair_energy_curves,
     relative_frobenius_error,
     retained_energy,
     rst_keep_reconstruct,
+    top_energy_tokens,
+    token_energy_profile,
     water_fill_allocation,
     wavelet_keep_reconstruct,
 )
@@ -128,3 +134,54 @@ def test_pair_energy_curves_monotone():
     assert curves.shape == (4, 64)
     assert np.all(np.diff(curves, axis=1) >= -1e-9)  # cumulative => non-decreasing
     assert np.allclose(curves[:, -1], 1.0, atol=1e-6)
+
+
+def _key_with_sink(N=64, sink_pos=0, sink_mag=20.0):
+    K = torch.randn(1, 2, N, 8) * 0.1
+    K[:, :, sink_pos, :] += sink_mag
+    return K
+
+
+def test_token_energy_profile_finds_sink():
+    K = _key_with_sink()
+    prof = token_energy_profile(K)
+    assert prof.shape == (64,)
+    assert int(prof.argmax()) == 0
+    assert int(top_energy_tokens(K, 1).item()) == 0
+
+
+def test_energy_fraction_in_tokens_high_for_sink():
+    K = _key_with_sink()
+    idx = top_energy_tokens(K, 1)
+    assert energy_fraction_in_tokens(K, idx) > 0.5  # one token dominates
+
+
+def test_excess_kurtosis_heavy_tail_positive():
+    K = _key_with_sink(sink_mag=30.0)
+    assert excess_kurtosis_along_seq(K) > 1.0  # spike => leptokurtic
+    smooth = torch.randn(1, 2, 256, 8)
+    assert excess_kurtosis_along_seq(smooth) < 1.0  # gaussian ~ 0
+
+
+def test_anchor_holdout_makes_anchor_rows_exact():
+    K = _key_with_sink()
+    idx = top_energy_tokens(K, 1)
+    rec = anchor_holdout_reconstruct(K, dct_keep_reconstruct, 0.25, idx)
+    assert torch.allclose(rec[:, :, idx, :], K[:, :, idx, :].float(), atol=1e-5)
+
+
+def test_anchor_holdout_reduces_error_on_sinky_signal():
+    K = _key_with_sink(sink_mag=20.0)
+    g = 0.25
+    e_plain = relative_frobenius_error(K, dct_keep_reconstruct(K, g))
+    idx = top_energy_tokens(K, 1)
+    e_anchor = relative_frobenius_error(K, anchor_holdout_reconstruct(K, dct_keep_reconstruct, g, idx))
+    assert e_anchor < e_plain  # exact sink removes the smeared global error
+
+
+def test_error_localization_in_unit_range():
+    K = _key_with_sink()
+    rec = dct_keep_reconstruct(K, 0.25)
+    idx = top_energy_tokens(K, 4)
+    frac = error_localization(K, rec, idx)
+    assert 0.0 <= frac <= 1.0

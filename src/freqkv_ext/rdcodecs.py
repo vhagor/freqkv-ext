@@ -325,3 +325,74 @@ def retained_energy(curves: np.ndarray, alloc: np.ndarray) -> float:
         L = int(alloc[i])
         vals.append(curves[i, L - 1] if L > 0 else 0.0)
     return float(np.mean(vals))
+
+
+# --------------------------------------------------------------------------
+# NE1 outlier diagnostics: is the wavelet win driven by localized outliers?
+# --------------------------------------------------------------------------
+
+
+def token_energy_profile(K: torch.Tensor) -> torch.Tensor:
+    """Per-token energy ``mean_{B,H,D} K[...,t,:]^2`` -> ``[N]`` (float32)."""
+    K = K.to(torch.float32)
+    return (K ** 2).mean(dim=(0, 1, 3))
+
+
+def top_energy_tokens(K: torch.Tensor, m: int) -> torch.Tensor:
+    """Indices of the ``m`` highest-energy token positions, shape ``[m]`` (long)."""
+    prof = token_energy_profile(K)
+    m = max(1, min(m, prof.numel()))
+    return torch.topk(prof, m).indices.sort().values
+
+
+def energy_fraction_in_tokens(K: torch.Tensor, idx: torch.Tensor) -> float:
+    """Fraction of total energy contained in token positions ``idx``."""
+    prof = token_energy_profile(K)
+    return float(prof[idx].sum() / prof.sum().clamp_min(1e-12))
+
+
+def excess_kurtosis_along_seq(K: torch.Tensor) -> float:
+    """Mean excess kurtosis of per-channel sequences (heavy tail => > 0)."""
+    K = K.to(torch.float32)
+    mu = K.mean(dim=2, keepdim=True)
+    d = K - mu
+    var = (d ** 2).mean(dim=2)
+    m4 = (d ** 4).mean(dim=2)
+    kurt = m4 / var.clamp_min(1e-12) ** 2 - 3.0
+    return float(kurt.mean().item())
+
+
+def error_localization(true: torch.Tensor, approx: torch.Tensor,
+                       idx: torch.Tensor) -> float:
+    """Fraction of squared reconstruction error that falls on token rows ``idx``."""
+    true = true.to(torch.float32)
+    approx = approx.to(torch.float32)
+    err2 = ((true - approx) ** 2)  # [B, H, N, D]
+    err_per_token = err2.sum(dim=(0, 1, 3))  # [N]
+    total = err_per_token.sum().clamp_min(1e-12)
+    return float(err_per_token[idx].sum() / total)
+
+
+def anchor_holdout_reconstruct(
+    K: torch.Tensor,
+    codec_fn,
+    gamma: float,
+    anchor_idx: torch.Tensor,
+    **codec_kw,
+) -> torch.Tensor:
+    """Keep ``anchor_idx`` tokens exact; compress the rest at a budget-adjusted rate.
+
+    The anchors cost ``m`` exact token-rows; we deduct that from the budget so the
+    total retained coefficient count still equals ``gamma * N`` per channel.
+    """
+    K = K.to(torch.float32)
+    B, H, N, D = K.shape
+    m = int(anchor_idx.numel())
+    keep_rest = max(1, int(round(gamma * N)) - m)
+    gamma_eff = keep_rest / N
+    mask = torch.ones(N, device=K.device)
+    mask[anchor_idx] = 0.0
+    K_rest = K * mask.view(1, 1, N, 1)
+    rec = codec_fn(K_rest, gamma_eff, **codec_kw) * mask.view(1, 1, N, 1)
+    rec[:, :, anchor_idx, :] = K[:, :, anchor_idx, :]
+    return rec
