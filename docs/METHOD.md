@@ -72,18 +72,25 @@ $\mathcal{O}(d/2)$ complex multiplies per retained bin.
 Pre-RoPE K's spectrum (FreqKV's empirical Figure 1) concentrates at low bins
 across all pairs. Post-RoPE, the modulation theorem moves pair $i$'s mass to
 bins around $n_i$. For LLaMA-2 ($d_\mathrm{head} = 128$,
-$\mathrm{base} = 10000$):
+$\mathrm{base} = 10000$, evaluated at $N = 4096$):
 
-- $\theta_0 = 1$ rad/sample. With $N = 2048$, $n_0 \approx 326$.
-- $\theta_{d/4} \approx 0.1$ rad/sample, so $n_{d/4} \approx 33$.
-- $\theta_{d/2 - 1} \approx 1/10000$ rad/sample, so $n_{d/2 - 1} \approx 0$.
+- $\theta_0 = 1$ rad/sample, so $n_0 \approx 652$.
+- $\theta_{d/8} = 0.1$ rad/sample, so $n_{16} \approx 65$.
+- $\theta_{d/4} = 0.01$ rad/sample, so $n_{32} \approx 7$.
+- $\theta_{d/2 - 1} \approx 10^{-4}$ rad/sample, so $n_{63} \approx 0$.
 
-A uniform low-pass that keeps bins $[0, L)$ is RoPE-aware only for the
-high-index pairs (small $\theta$). For the early-index pairs (large
-$\theta$), it discards the band where the post-RoPE energy actually lives.
-This is our candidate explanation for FreqKV's empirical weakness on tasks
-that depend on short-range positional detail (Needle-in-a-Haystack at the
-original window boundary; numerical / code retrieval).
+This is the empirical observation in the H100 spectrum analysis: post-RoPE
+peaks for pair 0 land at bin ~652, for pair 32 at bin ~7, for pair 63 at 0.
+
+A uniform low-pass that keeps bins $[0, L)$ misses $n_0$ only when
+$L < n_0 = 652$, i.e. $\gamma < n_0 / N \approx 0.16$. **At FreqKV's default
+$\gamma = 0.5$, the band $[0, L)$ contains every $n_i$ and FreqKV is not
+throwing away any pair's center**; the gap from a RoPE-matched bandpass is
+limited to per-channel band-shape adaptivity (modest). **The structural
+advantage of DFT-RoPE materializes at $\gamma \lesssim 0.16$**, where FreqKV
+starts losing high-$\theta$ pairs' band centers entirely — the same regime
+where FreqKV's own paper (Table 3) reports PPL explosion as $\gamma \to
+0.01$.
 
 ### 3.3 RoPE-matched bandpass
 

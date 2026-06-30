@@ -1,0 +1,14 @@
+{
+  "seq_len": 4096,
+  "head_dim": 128,
+  "num_heads": 32,
+  "rope_base": 10000.0,
+  "layers": [
+    0,
+    4,
+    8,
+    16,
+    31
+  ],
+  "model": "/root/llama2-7b/"
+}

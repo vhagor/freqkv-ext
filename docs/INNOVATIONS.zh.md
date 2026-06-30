@@ -47,8 +47,8 @@ C_i^{\mathrm{post\text{-}RoPE}}[k] \;=\; C_i^{\mathrm{pre\text{-}RoPE}}[k - n_i]
 $$
 
 所以 pair $i$ 的 **post-RoPE 相关频带**中心在 bin $n_i$，**不是**在 bin 0。
-LLaMA-2 $N = 2048$ 时 $n_i$ 从 326（$i = 0$，高频 pair）到 0（$i = 63$，慢
-pair）。
+LLaMA-2 $N = 4096$ 时 $n_i$ 从 652（$i = 0$，高频 pair）到 0（$i \gtrsim
+48$，慢 pair）。
 
 FreqKV 的统一低通保留 pre-RoPE 的 $[0, L)$；推理期 apply RoPE 后这段变成
 $[n_i, n_i + L) \bmod N$。对高 $\theta$ 的 pair，这和 post-RoPE 的目标频带
@@ -82,8 +82,9 @@ $[n_i - L/2,\, n_i + L/2]$ 个 bin。同样的预算 $L$，更聪明的分配。
       *Artifact*：``out/spectrum/layer*.png`` 的 pre-RoPE 子图低频有峰。
 
 - [ ] **(b) LLaMA-2-7B 的 post-RoPE K 频谱**。同脚本同输出；检查 per-pair 峰
-      和红色虚线（预测 $n_i$）对齐。重点检查 pair 0（高 $\theta$，峰 ~bin 326）和
-      pair 32（中 $\theta$，峰 ~bin 33）。
+      和红色虚线（预测 $n_i$）对齐。重点检查 pair 0（高 $\theta$，$N=4096$ 时
+      峰应在 bin $\approx 652$）和 pair 32（中 $\theta = 0.01$，峰在 bin
+      $\approx 7$）。
       *Artifact*：同样的 PNG；按 pair 记录 pass / fail。
 
 - [ ] **(b') 失败模式刻画**。如果 (b) 部分失败（如峰在但宽，或只对低 $\theta$

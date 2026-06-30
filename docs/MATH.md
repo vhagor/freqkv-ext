@@ -97,10 +97,10 @@ in $i$:
 | $i$ | $\theta_i$ (base=10000, $d=128$) |
 |-----|-----------------------------------|
 | 0   | $1.0$ rad/sample                  |
-| 16  | $0.316$ rad/sample                |
-| 32  | $0.10$ rad/sample                 |
-| 48  | $0.0316$ rad/sample               |
-| 63  | $1.0 \times 10^{-4}$ rad/sample   |
+| 16  | $0.1$ rad/sample                  |
+| 32  | $0.01$ rad/sample                 |
+| 48  | $0.001$ rad/sample                |
+| 63  | $1.15 \times 10^{-4}$ rad/sample  |
 
 The "fastest" pair rotates by about $1$ rad per token, the "slowest" by
 about $10^{-4}$ rad per token. Across pairs the angles cover four orders of
@@ -124,25 +124,39 @@ $$
 $n_i$ is hardwired by RoPE base and $N$; it does not depend on the model or
 the input.
 
-Plugging in $N = 2048$, $\mathrm{base} = 10000$, $d = 128$:
+Plugging in $\mathrm{base} = 10000$, $d = 128$:
 
-| $i$ | $\theta_i$            | $n_i$ |
-|-----|------------------------|-------|
-| 0   | $1.0$                 | 326   |
-| 16  | $0.316$               | 103   |
-| 32  | $0.10$                | 33    |
-| 48  | $0.0316$              | 10    |
-| 63  | $1 \times 10^{-4}$    | 0     |
+| $i$ | $\theta_i$              | $n_i$ ($N=2048$) | $n_i$ ($N=4096$) |
+|-----|--------------------------|------------------|------------------|
+| 0   | $1.0$                    | 326              | 652              |
+| 16  | $0.1$                    | 33               | 65               |
+| 32  | $0.01$                   | 3                | 7                |
+| 48  | $0.001$                  | 0                | 1                |
+| 63  | $1.15 \times 10^{-4}$    | 0                | 0                |
 
-So in a 2048-bin DFT, post-RoPE energy "lives" in bins ranging from 326
-(early pairs) down to 0 (late pairs). FreqKV's uniform low-pass keeps bins
-$[0, L)$. For $L = 1024$ it covers $n_i$ for $i \ge 8$; **for the eight
-fastest pairs ($i = 0, \dots, 7$), the post-RoPE band center is outside
-$[0, L)$**, and FreqKV is throwing away the post-RoPE-relevant content of
-those channels (it *does* preserve the pre-RoPE energy of those channels,
-which after RoPE applied at attention time still reconstructs the right
-answer, so this is not a correctness violation; it is, however, a place
-where a smarter, RoPE-matched band could in principle do better — see §6).
+So even in a 4096-bin DFT, post-RoPE energy stays in a fairly narrow envelope:
+$n_0 = 652$ at the high end, falling to 0 quickly for $i \gtrsim 32$. The
+empirical confirmation on LLaMA-2-7B is exactly this: pair 0 peaks at
+bin 652, pair 32 peaks near bin 7, pair 63 stays at bin 0.
+
+FreqKV's uniform low-pass keeps bins $[0, L)$ with $L = \gamma N$. The
+condition under which FreqKV's band **misses** $n_0$ (and thus loses pair 0's
+post-RoPE energy center) is
+
+$$
+L < n_0
+\;\iff\; \gamma < \frac{n_0}{N} = \frac{\theta_0}{2\pi} \approx 0.159.
+$$
+
+This is the key practical bound: at $\gamma = 0.5$ (FreqKV default), the band
+$[0, L)$ comfortably contains every $n_i$ and **FreqKV is not throwing away
+any pair's center** — the slack relative to a RoPE-matched bandpass is only
+in *per-channel band shape* (FreqKV uses a single $[0, L)$ window for every
+pair; bandpass uses different windows). At $\gamma \le 0.15$, FreqKV begins
+to lose pair 0's post-RoPE band entirely; below that, more high-$\theta$
+pairs follow. **This is the regime where DFT-RoPE bandpass is structurally
+expected to outperform FreqKV** — and it lines up with FreqKV's own Table 3
+showing PPL explosion at $\gamma \to 0.01$.
 
 ## 6. Why FreqKV is still correct, and where the slack is
 
@@ -158,7 +172,7 @@ spectrum**.
 The slack exists because the "pre-RoPE low-pass" loses *every* energy
 component outside $[0, L)$ (in pre-RoPE), and that energy includes the
 high-frequency short-range positional detail that, **after** RoPE, ends up at
-bins like 326. A "post-RoPE matched bandpass" can keep different (smaller)
+bins like 652. A "post-RoPE matched bandpass" can keep different (smaller)
 sets of pre-RoPE bins per pair, chosen to preserve the post-RoPE attention
 behavior more faithfully under the same total budget.
 
@@ -209,7 +223,194 @@ fixed-length cache interface. A principled wavelet cache would store the
 sparse coefficient set directly; that is a larger refactor (different cache
 data structure) reserved for later.
 
-## 8. Numerical conventions in this repo
+## 8. RST-KV: math of the bulk + sparse-residual decomposition
+
+This section gives the rigorous form of the method proposed in this repo,
+**RST-KV (RoPE-Spectral Transform coding with sparse residual)**. It upgrades
+the "per-pair RoPE shift" of §5 into a complete rate-distortion code.
+
+### 8.1 Notation
+
+Fix a head; sequence length $N$, head dim $d$. The pre-RoPE key
+$k_t \in \mathbb{R}^d$ is paired (§4) into complex sequences
+$c_i(t) = k_{2i}(t) + j\,k_{2i+1}(t)$, $i = 0, \dots, d/2-1$. The post-RoPE
+complex sequence and its sequence-axis DFT are
+
+$$
+\tilde{c}_i(t) = c_i(t)\, e^{j \theta_i t}, \qquad
+\widetilde{C}_i[\omega] = C_i[\omega - n_i], \qquad
+n_i = \mathrm{round}\!\left(\frac{\theta_i N}{2\pi}\right) \bmod N .
+$$
+
+Write the post-RoPE real key tensor as $\widetilde{K} \in \mathbb{R}^{N \times d}$.
+
+### 8.2 The core decomposition
+
+$$
+\boxed{\;\widetilde{K} \;=\; \underbrace{B}_{\text{spectral bulk}} \;+\; \underbrace{R}_{\text{sparse residual}}, \qquad
+B = \mathcal{P}_{\mathcal{B}}\,\widetilde{K}, \quad R = (\mathcal{I} - \mathcal{P}_{\mathcal{B}})\,\widetilde{K}\;}
+$$
+
+where $\mathcal{P}_{\mathcal{B}}$ is the RoPE-matched bandpass **orthogonal
+projection** of §8.3. The encoded reconstruction is
+
+$$
+\widehat{K} \;=\; B \;+\; \widehat{R}, \qquad \widehat{R} = \mathcal{T}_S(R),
+$$
+
+with $\mathcal{T}_S$ the sparse hard-threshold operator of §8.4. This is
+isomorphic to robust PCA's low-rank + sparse decomposition, but in the RoPE
+frequency domain: $B$ is the position-predictable structured bulk,
+$\widehat{R}$ captures localized events.
+
+### 8.3 Bulk: per-pair RoPE-matched bandpass
+
+For pair $i$, the band of $L_i$ bins centered at $n_i$:
+
+$$
+\mathcal{B}_i = \Big\{\,(n_i + \delta) \bmod N \;:\; \delta = -\lfloor L_i/2 \rfloor, \dots, \lceil L_i/2 \rceil - 1 \,\Big\}, \qquad |\mathcal{B}_i| = L_i .
+$$
+
+Bandpass (zero out-of-band) + IDFT reconstruction:
+
+$$
+\widehat{C}_i^{\,\mathrm{bulk}}[\omega] = \widetilde{C}_i[\omega]\,\mathbf{1}[\omega \in \mathcal{B}_i], \qquad
+b_i(t) = \frac{1}{N} \sum_{\omega \in \mathcal{B}_i} \widetilde{C}_i[\omega]\, e^{+j 2\pi \omega t / N} .
+$$
+
+Since bandpass = selecting a subset of an orthonormal Fourier basis,
+$\mathcal{P}_{\mathcal{B}}$ is an orthogonal projection:
+$\mathcal{P}_{\mathcal{B}}^2 = \mathcal{P}_{\mathcal{B}} = \mathcal{P}_{\mathcal{B}}^{*}$.
+
+- For $V$ (no RoPE): set $n_i \equiv 0$, bandpass degenerates to a plain
+  low-pass (code path `is_key=False`).
+- **FreqKV is the special case**: every pair shares one window centered at
+  $0$, i.e. $n_i \equiv 0,\ L_i \equiv L = \gamma N$.
+
+### 8.4 Residual: sparse coding
+
+Residual $R = (\mathcal{I} - \mathcal{P}_{\mathcal{B}})\,\widetilde{K}$. For
+pair $i$'s residual series $r_i(t)$ (time domain) or its wavelet coefficients
+$w_i = \mathrm{DWT}(r_i)$, keep the $S_i$ largest-magnitude entries:
+
+$$
+\Omega_i = \operatorname*{arg\,top\text{-}S_i}_{t} \, |r_i(t)|, \qquad
+\widehat{r}_i(t) =
+\begin{cases}
+r_i(t), & t \in \Omega_i \\
+0, & \text{otherwise.}
+\end{cases}
+$$
+
+This is $\mathcal{T}_S$ (`residual_domain="time"` uses time-domain top-$S$,
+`="wavelet"` uses wavelet-domain top-$S$). A needle / code symbol is a single
+time-domain spike, so a tiny $S_i$ restores it exactly — precisely the local
+information the smooth bulk misses and FreqKV discards forever.
+
+### 8.5 Distortion decomposition (orthogonality ⇒ Pythagoras)
+
+Since $\mathcal{P}_{\mathcal{B}}$ is orthogonal, $B \perp R$, hence
+
+$$
+\|\widetilde{K}\|^2 = \|B\|^2 + \|R\|^2,
+$$
+
+and the reconstruction distortion collapses to **only the discarded residual
+entries**:
+
+$$
+\boxed{\;\big\|\widetilde{K} - \widehat{K}\big\|^2 = \big\|R - \widehat{R}\big\|^2 = \sum_i \sum_{t \notin \Omega_i} |r_i(t)|^2\;}
+$$
+
+Total distortion = the tail of out-of-band energy not recovered by the sparse
+residual. The bandpass cheaply absorbs the structured energy concentrated
+near $n_i$; the residual exactly absorbs the few large outliers; their
+supports do not overlap — the mathematical reason this is "complementary
+components" rather than "a mashup of methods".
+
+### 8.6 Rate-distortion budget allocation
+
+Budget = $\gamma N$ retained real scalars per channel. Budget parity: $1$
+complex bin $= 2$ reals $=$ covers the $2$ channels of a pair $= 1$ real /
+channel, so it is directly comparable to DCT's $\gamma$. Two-way split:
+
+$$
+\underbrace{\alpha \gamma N}_{\text{bulk: } \sum_i L_i / (d/2)} \;+\; \underbrace{(1-\alpha)\gamma N}_{\text{residual: } \sum_i S_i / (d/2)} \;=\; \gamma N .
+$$
+
+**(a) Per-pair bandwidth inside the bulk (water-filling).** Given a bulk
+budget of $M = \alpha \gamma N \cdot \tfrac{d}{2}$ bins, maximize retained
+energy
+
+$$
+\max_{\{L_i\}} \ \sum_i \sum_{\omega \in \mathcal{B}_i(L_i)} \big|\widetilde{C}_i[\omega]\big|^2
+\quad \text{s.t.} \quad \sum_i L_i = M .
+$$
+
+Its KKT solution is a **single power level $\lambda$ (water level)**:
+
+$$
+\boxed{\;\text{keep bin } (i,\omega) \iff \big|\widetilde{C}_i[\omega]\big|^2 \ge \lambda, \qquad
+L_i(\lambda) = \#\{\omega : |\widetilde{C}_i[\omega]|^2 \ge \lambda\}\;}
+$$
+
+with $\lambda$ chosen so $\sum_i L_i(\lambda) = M$. Energy-concentrated pairs
+(large $\theta_i$) automatically get more bandwidth. FreqKV's uniform
+$L_i \equiv L$ is the suboptimal special case of constant $\lambda$. Code
+`water_fill_allocation` implements this via greedy marginal gain under the
+"unimodal around $n_i$" assumption.
+
+**(b) The bulk / residual split $\alpha$.** Under total budget $\gamma$,
+
+$$
+\alpha^\star(\gamma) = \arg\min_{\alpha \in [0,1]} \ \big\| \widetilde{K} - \widehat{K}_\alpha \big\|^2 .
+$$
+
+Expected trend: large $\gamma \Rightarrow \alpha^\star \to 1$ (bandpass
+suffices); small $\gamma \Rightarrow \alpha^\star$ drops (residual matters).
+The $\alpha^\star(\gamma)$ curve is produced directly by the $\alpha$ sweep in
+`rate_distortion.py`.
+
+### 8.7 The real objective: attention-output distortion + Parseval
+
+What ultimately matters is the attention output, so the true objective is
+
+$$
+D \;=\; \frac{\big\| \operatorname{softmax}(q K^\top / \sqrt{d})\,V - \operatorname{softmax}(q \widehat{K}^\top / \sqrt{d})\,\widehat{V} \big\|}{\big\| \operatorname{softmax}(q K^\top / \sqrt{d})\,V \big\|},
+$$
+
+with $K$ reconstruction error as its tractable surrogate. By Parseval (§1),
+the inner product can be computed in frequency:
+
+$$
+\langle q_t, \tilde{k}_s \rangle = \frac{1}{N} \sum_i \sum_{\omega} Q_i[\omega]\, \widetilde{C}_i^{*}[\omega] .
+$$
+
+Restricting $Q, K$ to the retained $L$ bins makes the attention score an
+$L$-bin computation; the $V$-side IDFT folds offline into $W_o$, removing the
+online RoPE GEMM and IDFT at decode — a systems gain unique to the DFT path
+(the wavelet path cannot provide it).
+
+### 8.8 Mapping to code
+
+| Formula | Code |
+|---------|------|
+| Modulation theorem $n_i = \mathrm{round}(\theta_i N / 2\pi)$ | `rope_utils.thetas_to_bin_offsets` |
+| Bandpass projection $\mathcal{P}_{\mathcal{B}}$ + IDFT | `rdcodecs.dft_rope_keep_reconstruct` |
+| Decomposition $\widehat{K} = B + \mathcal{T}_S(R)$ | `rdcodecs.rst_keep_reconstruct` |
+| Hard threshold $\mathcal{T}_S$ | `rdcodecs._topk_keep_lastdim` |
+| Water level $\lambda$ | `rdcodecs.water_fill_allocation` + `pair_energy_curves` |
+| Attention distortion $D$ | `rdcodecs.causal_attention_output` |
+| Fixed-length interface (training E4) | `transforms/rst_hybrid.rst_compress` |
+
+**In one sentence**: RST-KV orthogonally decomposes the post-RoPE
+$\widetilde{K} = \mathcal{P}_{\mathcal{B}}\widetilde{K} + (\mathcal{I} - \mathcal{P}_{\mathcal{B}})\widetilde{K}$,
+encodes the former with a per-pair bandpass centered at $n_i$ whose width is
+set by the water level $\lambda$, encodes the latter with a hard threshold
+$\mathcal{T}_S$, and sets the split $\alpha$ by rate-distortion optimization.
+FreqKV is the degenerate case $n_i \equiv 0,\ L_i \equiv L,\ \alpha \equiv 1$.
+
+## 9. Numerical conventions in this repo
 
 - All transforms execute in **float32** internally and cast back to the
   input dtype at the end, matching FreqKV's `dct` / `idct` implementations.
@@ -224,7 +425,7 @@ data structure) reserved for later.
 - Wavelet uses PyWavelets "symmetric" boundary by default; "periodization"
   is available via `mode` kwarg if needed.
 
-## 9. Suggested reading
+## 10. Suggested reading
 
 - A. V. Oppenheim, R. W. Schafer. *Discrete-Time Signal Processing*
   (Pearson). Ch. 8 (DFT), 9 (FFT), 4 (sampling).

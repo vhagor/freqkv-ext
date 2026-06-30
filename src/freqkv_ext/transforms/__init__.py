@@ -13,6 +13,7 @@ import torch
 from .dct_baseline import dct_compress_baseline
 from .dft_lowpass import dft_lowpass_compress
 from .dft_rope_aware import dft_rope_aware_compress
+from .rst_hybrid import rst_compress
 from .wavelet import wavelet_adaptive_compress
 
 Compressor = Callable[..., torch.Tensor]
@@ -23,6 +24,7 @@ METHODS = {
     "dft_lowpass": dft_lowpass_compress,
     "dft_rope": dft_rope_aware_compress,
     "wavelet": wavelet_adaptive_compress,
+    "rst": rst_compress,
 }
 
 
@@ -43,4 +45,5 @@ __all__ = [
     "dft_lowpass_compress",
     "dft_rope_aware_compress",
     "wavelet_adaptive_compress",
+    "rst_compress",
 ]

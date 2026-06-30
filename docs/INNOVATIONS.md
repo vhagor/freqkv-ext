@@ -55,8 +55,8 @@ C_i^{\mathrm{post\text{-}RoPE}}[k] \;=\; C_i^{\mathrm{pre\text{-}RoPE}}[k - n_i]
 $$
 
 So the **post-RoPE relevant band** of pair $i$ is centered at bin $n_i$,
-NOT at bin 0. For LLaMA-2 with $N = 2048$, $n_i$ ranges from 326
-($i = 0$, fast pair) down to 0 ($i = 63$, slow pair).
+NOT at bin 0. For LLaMA-2 with $N = 4096$, $n_i$ ranges from 652 ($i = 0$,
+fast pair) down to 0 ($i \gtrsim 48$, slow pairs).
 
 FreqKV's uniform low-pass keeps bins $[0, L)$ of pre-RoPE; after on-the-fly
 RoPE this band becomes $[n_i, n_i + L) \bmod N$. For high-$\theta$ pairs
@@ -99,8 +99,9 @@ Group by phase. Each line ends with the artifact that "closes" it.
 
 - [ ] **(b) Post-RoPE K spectrum on LLaMA-2-7B**. Same script, same outputs;
       check that the per-pair peaks line up with the red dotted lines
-      (predicted $n_i$). Inspect specifically pair 0 (high $\theta$, peak should
-      be ~bin 326) and pair 32 (mid θ, peak ~bin 33).
+      (predicted $n_i$). Inspect specifically pair 0 (high $\theta$, peak
+      should be at bin $\approx 652$ at $N = 4096$) and pair 32 (mid
+      $\theta = 0.01$, peak at bin $\approx 7$).
       *Artifact*: same PNGs; pass/fail per pair logged.
 
 - [ ] **(b') Failure-mode characterization**. If (b) fails partially (e.g.

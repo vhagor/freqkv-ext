@@ -93,6 +93,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Target fraction of L2 energy for the sparsity comparison.")
     p.add_argument("--wavelet", default="db4",
                    help="PyWavelets family name for the wavelet sparsity analysis.")
+    p.add_argument("--no-plot", action="store_true",
+                   help="Skip PNG generation; emit text tables only (copy-paste friendly).")
+    p.add_argument("--peak-pairs", type=int, nargs="+", default=None,
+                   help="Pair indices for the peak-alignment table (default: spread across i).")
     return p.parse_args()
 
 
@@ -240,12 +244,64 @@ def main() -> None:
     }, indent=2))
     print(f"[save] raw spectra -> {spectra_npz}")
 
-    # Plot. Lazy import: only require matplotlib at output time.
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    # ------------------------------------------------------------------
+    # E1 text peak-alignment table: for selected pairs, compare observed
+    # post-RoPE peak bin to the predicted n_i = round(theta_i N / 2pi).
+    # Pure text so it is copy-paste friendly.
+    # ------------------------------------------------------------------
+    i_all = np.arange(head_dim // 2)
+    thetas_all = args.rope_base ** (-2.0 * i_all / head_dim)
+    pred_all = np.round(thetas_all * args.seq_len / (2 * np.pi)).astype(int) % args.seq_len
+    if args.peak_pairs is not None:
+        peak_pairs = [p for p in args.peak_pairs if 0 <= p < head_dim // 2]
+    else:
+        dp = head_dim // 2
+        peak_pairs = sorted(set([0, dp // 8, dp // 4, dp // 2, dp - 1]))
+
+    peak_report: dict[str, list] = {}
+    print()
+    print("# E1 peak-alignment (post-RoPE)")
+    for ls in result.layers:
+        post = ls.post_rope_power  # [d_pair, N]
+        N = post.shape[1]
+        print()
+        print(f"## Layer {ls.layer_idx}")
+        print("| pair | theta_i | predicted n_i | observed peak | |peak-pred| | sharpness(peak/median) | DC frac |")
+        print("|----:|--------:|--------------:|--------------:|-----------:|-----------------------:|--------:|")
+        rows = []
+        for p in peak_pairs:
+            spec = post[p]
+            # Ignore the DC bin when locating the shifted peak (pair 0's comb tooth).
+            search = spec.copy()
+            obs = int(np.argmax(search))
+            # If argmax landed on bin 0 but a non-DC peak exists, also report it.
+            if obs == 0 and N > 4:
+                obs = int(1 + np.argmax(search[1:]))
+            pred = int(pred_all[p])
+            dist = min(abs(obs - pred), N - abs(obs - pred))
+            sharp = float(spec[obs] / (np.median(spec) + 1e-12))
+            dc_frac = float(spec[0] / (spec.sum() + 1e-12))
+            print(f"| {p} | {thetas_all[p]:.4g} | {pred} | {obs} | {dist} | {sharp:.1f} | {dc_frac:.3f} |")
+            rows.append({"pair": p, "theta": float(thetas_all[p]), "pred_n": pred,
+                         "obs_peak": obs, "dist": dist, "sharpness": sharp, "dc_frac": dc_frac})
+        peak_report[f"layer{ls.layer_idx}"] = rows
+    (out_dir / "peak_alignment.json").write_text(json.dumps(peak_report, indent=2))
+    print()
+    print(f"[save] peak alignment -> {out_dir / 'peak_alignment.json'}")
+
+    # Plotting is optional. Under --no-plot we still emit all text + json.
+    do_plot = not args.no_plot
+    if do_plot:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    else:
+        plt = None
+        print("[plot] skipped via --no-plot (text + json only)")
 
     for ls in result.layers:
+        if not do_plot:
+            break
         pre = ls.pre_rope_power  # [d_pair, N]
         post = ls.post_rope_power
         N = pre.shape[1]
@@ -313,28 +369,28 @@ def main() -> None:
         }
         layer_rows.append((li, dct_s, dft_s, wav_s))
 
-        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-        parts = ax.violinplot(
-            [dct_s, dft_s, wav_s[~np.isnan(wav_s)]],
-            showmedians=True, showextrema=False,
-        )
-        ax.set_xticks([1, 2, 3])
-        ax.set_xticklabels(["DCT", "DFT (rfft)", f"Wavelet ({args.wavelet})"])
-        ax.set_ylabel(f"fraction of coeffs for {int(args.energy_target*100)}% energy")
-        ax.set_title(f"Layer {li} sparsity (lower = more compressible)")
-        ax.set_ylim(0.0, 1.0)
-        ax.axhline(0.5, color="gray", linestyle=":", alpha=0.4)
-        fig.tight_layout()
-        sp_png = out_dir / f"layer{li:02d}_sparsity.png"
-        fig.savefig(sp_png, dpi=140)
-        plt.close(fig)
+        if do_plot:
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            parts = ax.violinplot(
+                [dct_s, dft_s, wav_s[~np.isnan(wav_s)]],
+                showmedians=True, showextrema=False,
+            )
+            ax.set_xticks([1, 2, 3])
+            ax.set_xticklabels(["DCT", "DFT (rfft)", f"Wavelet ({args.wavelet})"])
+            ax.set_ylabel(f"fraction of coeffs for {int(args.energy_target*100)}% energy")
+            ax.set_title(f"Layer {li} sparsity (lower = more compressible)")
+            ax.set_ylim(0.0, 1.0)
+            ax.axhline(0.5, color="gray", linestyle=":", alpha=0.4)
+            fig.tight_layout()
+            sp_png = out_dir / f"layer{li:02d}_sparsity.png"
+            fig.savefig(sp_png, dpi=140)
+            plt.close(fig)
         print(f"[sparsity] layer {li}: "
               f"DCT p50={sparsity_summary[f'layer{li}']['dct']['p50']:.3f}  "
               f"DFT p50={sparsity_summary[f'layer{li}']['dft']['p50']:.3f}  "
-              f"Wavelet p50={sparsity_summary[f'layer{li}']['wavelet']['p50']:.3f}  "
-              f"-> {sp_png.name}")
+              f"Wavelet p50={sparsity_summary[f'layer{li}']['wavelet']['p50']:.3f}")
 
-    if layer_rows:
+    if layer_rows and do_plot:
         layers = [r[0] for r in layer_rows]
         dct_med = [np.median(r[1]) for r in layer_rows]
         dft_med = [np.median(r[2]) for r in layer_rows]
@@ -364,7 +420,7 @@ def main() -> None:
         wav_p50 = float(np.nanmedian([np.nanmedian(r[3]) for r in layer_rows]))
         delta = dct_p50 - wav_p50
         print()
-        print(f"[gate] Across plotted layers, median p50(DCT)={dct_p50:.3f}, "
+        print(f"[gate] Across analyzed layers, median p50(DCT)={dct_p50:.3f}, "
               f"p50(Wavelet)={wav_p50:.3f}, delta={delta:+.3f}.")
         if delta > 0.05:
             print("[gate] Wavelet is materially more compressible than DCT on this model. "
