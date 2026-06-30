@@ -208,6 +208,32 @@ python scripts/diagnose_outliers.py \
 
 把 `results/ne1_llama2/diagnose.md` 整份贴回来即可。
 
+## 3c. NE2'（诊断）——小波赢是「基底」还是「自适应选择」？
+
+NE0 已证"小波是更好的基底"，但 NE0 拿 DCT-低通 比 小波-topk，**混淆了基底与选择规则**
+（FreqKV 的 DCT 保留前 L 个低频，小波保留幅值最大的 L 个）。这一步把两者拆开，并刻画
+K 的平滑性类别。单卡 <1h，纯文本。
+
+```bash
+python scripts/diagnose_basis.py \
+    --model_name_or_path "$MODEL" \
+    --seq-len 2048 --num-samples 8 \
+    --layers 0 8 16 31 \
+    --gammas 0.5 0.25 0.125 \
+    --out-dir results/ne2b_llama2
+```
+
+**判读（脚本末尾自动给）**：
+
+| 观察 | 含义 | 方法选择 |
+|------|------|----------|
+| basis effect ≫ selection effect | 赢点在基底 | 小波是方法主体 |
+| selection effect ≫ basis effect | 赢点在自适应选择 | 用 **adaptive-DCT(top-k)** 即可，更省、保留快变换 |
+| 两者相当 | 都重要 | 自适应选择 + 小波基 |
+| first-difference kurtosis ≫ value kurtosis | K 是分段光滑/有界变差 | 解释"为何小波更优"的机理（写进论文）|
+
+把 `results/ne2b_llama2/diagnose_basis.md` 整份贴回来。
+
 ## 4. 本地连通性自检（在 H100 跑之前，可选）
 
 在任意机器（含本地 RTX5060 / 纯 CPU）先确认脚本能跑通、再上 H100：
@@ -225,7 +251,13 @@ python scripts/diagnose_outliers.py --dry-run \
     --gammas 0.5 0.25 0.125 --device cpu --dtype float32 \
     --out-dir results/ne1_dryrun
 
-# 单元测试（44 个）
+# 基底/选择诊断全链路（合成分段光滑信号）
+python scripts/diagnose_basis.py --dry-run \
+    --seq-len 256 --num-samples 2 --layers 0 4 \
+    --gammas 0.5 0.25 0.125 --device cpu --dtype float32 \
+    --out-dir results/ne2b_dryrun
+
+# 单元测试（48 个）
 uv run --extra cpu pytest -q
 ```
 

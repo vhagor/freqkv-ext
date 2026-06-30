@@ -114,6 +114,41 @@ def wavelet_sparsity_per_trace(
     return out
 
 
+def wavelet_band_energy(
+    traces: np.ndarray,
+    wavelet: str = "db4",
+    mode: str = "symmetric",
+    level: Optional[int] = None,
+) -> tuple[float, np.ndarray]:
+    """Mean fraction of energy per wavelet band (approx + each detail scale).
+
+    Returns ``(approx_frac, detail_fracs)`` where ``detail_fracs`` is ordered
+    coarse->fine. A piecewise-smooth signal puts most energy in the approx band
+    plus a few large detail coefficients localized at edges; a broadband
+    stationary signal spreads energy across all detail scales.
+    """
+    if not _HAS_PYWT:
+        raise RuntimeError("PyWavelets is required for wavelet_band_energy.")
+    N = traces.shape[1]
+    if level is None:
+        level = max(1, min(_pywt.dwt_max_level(N, wavelet), int(np.floor(np.log2(N)))))
+    approx_accum = 0.0
+    detail_accum = np.zeros(level, dtype=np.float64)
+    n = 0
+    for m in range(traces.shape[0]):
+        coeffs = _pywt.wavedec(traces[m], wavelet, level=level, mode=mode)
+        energies = np.array([float((np.asarray(c) ** 2).sum()) for c in coeffs])
+        total = energies.sum()
+        if total <= 0:
+            continue
+        approx_accum += energies[0] / total
+        detail_accum += energies[1:] / total
+        n += 1
+    if n == 0:
+        return 0.0, np.zeros(level)
+    return approx_accum / n, detail_accum / n
+
+
 def sample_traces(
     keys: torch.Tensor,
     num_traces: int,

@@ -13,6 +13,7 @@ from freqkv_ext.rdcodecs import (
     energy_fraction_in_tokens,
     error_localization,
     excess_kurtosis_along_seq,
+    first_difference_kurtosis,
     pair_energy_curves,
     relative_frobenius_error,
     retained_energy,
@@ -185,3 +186,22 @@ def test_error_localization_in_unit_range():
     idx = top_energy_tokens(K, 4)
     frac = error_localization(K, rec, idx)
     assert 0.0 <= frac <= 1.0
+
+
+def test_dct_topk_not_worse_than_lowpass():
+    # Adaptive (magnitude) selection can only retain >= energy than fixed low-pass.
+    x = torch.randn(1, 2, 64, 8)
+    g = 0.25
+    e_lp = relative_frobenius_error(x, dct_keep_reconstruct(x, g, select="lowpass"))
+    e_tk = relative_frobenius_error(x, dct_keep_reconstruct(x, g, select="topk"))
+    assert e_tk <= e_lp + 1e-5
+
+
+def test_first_difference_kurtosis_detects_piecewise():
+    # Piecewise-constant + small noise: smooth values but spiky differences.
+    N = 256
+    base = torch.zeros(1, 1, N, 4)
+    base[:, :, N // 2:] += 5.0  # one big jump => sparse spiky differences
+    base = base + 0.01 * torch.randn(1, 1, N, 4)
+    smooth = torch.cumsum(0.1 * torch.randn(1, 1, N, 4), dim=2)  # random walk, gaussian diffs
+    assert first_difference_kurtosis(base) > first_difference_kurtosis(smooth)

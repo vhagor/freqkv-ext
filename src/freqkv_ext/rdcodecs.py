@@ -70,14 +70,26 @@ def _topk_keep_lastdim(x: torch.Tensor, k: int) -> torch.Tensor:
 # --------------------------------------------------------------------------
 
 
-def dct_keep_reconstruct(x: torch.Tensor, gamma: float, **_unused) -> torch.Tensor:
-    """FreqKV-style DCT-II low-pass: keep the lowest ``gamma*N`` coefficients."""
+def dct_keep_reconstruct(
+    x: torch.Tensor, gamma: float, select: str = "lowpass", **_unused
+) -> torch.Tensor:
+    """Sequence-axis DCT-II compression keeping ``gamma*N`` coefficients.
+
+    ``select``:
+        - ``"lowpass"`` (FreqKV): keep the lowest ``L`` frequency coefficients.
+        - ``"topk"``: keep the ``L`` largest-magnitude coefficients (adaptive).
+          Used to separate the *basis* effect from the *selection-rule* effect
+          when comparing DCT against magnitude-thresholded wavelets.
+    """
     x = x.to(torch.float32)
     B, H, N, D = x.shape
     L = _budget_len(gamma, N)
     x_seqlast = x.permute(0, 1, 3, 2)  # [B, H, D, N]
     X = _dct(x_seqlast, norm="ortho")
-    X[..., L:] = 0.0
+    if select == "topk":
+        X = _topk_keep_lastdim(X, L)
+    else:
+        X[..., L:] = 0.0
     xr = _idct(X, norm="ortho")
     return xr.permute(0, 1, 3, 2).contiguous()
 
@@ -351,15 +363,29 @@ def energy_fraction_in_tokens(K: torch.Tensor, idx: torch.Tensor) -> float:
     return float(prof[idx].sum() / prof.sum().clamp_min(1e-12))
 
 
+def _excess_kurtosis(x: torch.Tensor, dim: int) -> torch.Tensor:
+    mu = x.mean(dim=dim, keepdim=True)
+    d = x - mu
+    var = (d ** 2).mean(dim=dim)
+    m4 = (d ** 4).mean(dim=dim)
+    return m4 / var.clamp_min(1e-12) ** 2 - 3.0
+
+
 def excess_kurtosis_along_seq(K: torch.Tensor) -> float:
-    """Mean excess kurtosis of per-channel sequences (heavy tail => > 0)."""
+    """Mean excess kurtosis of per-channel VALUE sequences (heavy tail => > 0)."""
+    return float(_excess_kurtosis(K.to(torch.float32), dim=2).mean().item())
+
+
+def first_difference_kurtosis(K: torch.Tensor) -> float:
+    """Mean excess kurtosis of first differences ``K(t)-K(t-1)`` per channel.
+
+    Stationary AR(1) (rho->1) has light-tailed (Gaussian) differences (~0). A
+    piecewise-smooth / bounded-variation signal has sparse, spiky differences
+    (large positive kurtosis) -> the signature that motivates a wavelet basis.
+    """
     K = K.to(torch.float32)
-    mu = K.mean(dim=2, keepdim=True)
-    d = K - mu
-    var = (d ** 2).mean(dim=2)
-    m4 = (d ** 4).mean(dim=2)
-    kurt = m4 / var.clamp_min(1e-12) ** 2 - 3.0
-    return float(kurt.mean().item())
+    dK = K[:, :, 1:, :] - K[:, :, :-1, :]
+    return float(_excess_kurtosis(dK, dim=2).mean().item())
 
 
 def error_localization(true: torch.Tensor, approx: torch.Tensor,

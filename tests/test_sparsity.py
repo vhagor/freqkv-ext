@@ -19,8 +19,25 @@ from freqkv_ext.sparsity import (
     _sparsity_at,
     dct_sparsity_per_trace,
     dft_sparsity_per_trace,
+    wavelet_band_energy,
     wavelet_sparsity_per_trace,
 )
+
+
+def test_wavelet_band_energy_normalizes():
+    rng = np.random.default_rng(0)
+    traces = rng.standard_normal((16, 128)).astype(np.float32)
+    approx, details = wavelet_band_energy(traces, wavelet="db4")
+    assert 0.0 <= approx <= 1.0
+    assert details.ndim == 1 and details.size >= 1
+    assert abs(approx + float(details.sum()) - 1.0) < 1e-5  # bands partition energy
+
+
+def test_wavelet_band_energy_smooth_is_approx_heavy():
+    t = np.linspace(0, 1, 256)
+    smooth = np.stack([np.sin(2 * np.pi * (1 + i % 2) * t) for i in range(16)]).astype(np.float32)
+    approx, _ = wavelet_band_energy(smooth, wavelet="db4")
+    assert approx > 0.5  # smooth signal => most energy in the coarse approx band
 
 
 # -------- sanity --------
